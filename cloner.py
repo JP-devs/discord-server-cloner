@@ -5,33 +5,12 @@ from functools import partial
 import discord
 from colorama import *
 
-# slow things down a bit - self-token accounts get rate limited fast
-_delay = 0.2
+# user-token accounts trip the 429 wall fast, so keep a beat between calls
+_pace = 0.2
 
 
-def log(message, color=Fore.CYAN, symbol="+"):
-    prefix = f" {symbol} " if symbol else ""
-    print(f"{Style.BRIGHT}{color}{prefix}{message}{Style.RESET_ALL}")
-
-
-def print_add(message):
-    log(message, Fore.CYAN, "+")
-
-
-def print_del(message):
-    log(message, Fore.MAGENTA, "-")
-
-
-def print_info(message):
-    log(message, Fore.GREEN, "*")
-
-
-def print_warn(message):
-    log(message, Fore.YELLOW, "!")
-
-
-def print_err(message):
-    log(message, Fore.RED, "X")
+def say(msg, colour=Fore.CYAN, mark="+"):
+    print(f"{Style.BRIGHT}{colour} {mark} {msg}{Style.RESET_ALL}")
 
 
 class Clone:
@@ -39,92 +18,89 @@ class Clone:
         self.source = source
         self.dest = dest
         self.use_emojis = use_emojis
-        self.role_lookup = {}
+        self.name2role = {}
 
-    async def _attempt(self, what, fn):
-        # user-token clients get throttled hard, so loop on 429s instead of dying
+    async def _poke(self, what, task):
+        # 429s are the norm on self-tokens - sleep them off instead of dying
         while True:
             try:
-                return await fn()
+                return await task()
             except discord.Forbidden:
-                print_err(f"forbidden: {what}")
+                say(f"forbidden: {what}", Fore.RED, "X")
                 return None
             except discord.NotFound:
-                print_err(f"not found: {what}")
+                say(f"not found: {what}", Fore.RED, "X")
                 return None
             except discord.HTTPException as e:
                 if e.status != 429:
-                    print_err(f"http {e.status}: {what}")
+                    say(f"http {e.status}: {what}", Fore.RED, "X")
                     return None
-                wait = float(getattr(e, "retry_after", 5))
-                print_warn(f"rate limited on '{what}' - sleeping {wait:.1f}s")
-                await asyncio.sleep(wait)
+                backoff = float(getattr(e, "retry_after", 5))
+                say(f"rate limited on '{what}' - waiting {backoff:.1f}s", Fore.YELLOW, "!")
+                await asyncio.sleep(backoff)
 
-    async def check_dest_perms(self):
-        p = self.dest.me.guild_permissions
-        checks = {
-            "MANAGE_CHANNELS": p.manage_channels,
-            "MANAGE_ROLES": p.manage_roles,
-            "MANAGE_GUILD": p.manage_guild,
+    async def perm_gaps(self):
+        # the destination token needs these three, plus emoji perms when enabled
+        g = self.dest.me.guild_permissions
+        want = {
+            "MANAGE_CHANNELS": g.manage_channels,
+            "MANAGE_ROLES": g.manage_roles,
+            "MANAGE_GUILD": g.manage_guild,
         }
         if self.use_emojis:
-            checks["MANAGE_EMOJIS_AND_STICKERS"] = p.manage_emojis or p.manage_expressions
-        return [k for k, ok in checks.items() if not ok]
+            want["MANAGE_EMOJIS_AND_STICKERS"] = g.manage_emojis or g.manage_expressions
+        return [k for k, ok in want.items() if not ok]
 
-    def invis_source_channels(self):
+    def hidden_src(self):
+        # channels below this token's visibility line - can't be read, so skip them
         me = self.source.me
-        return sum(
-            1 for c in self.source.channels
-            if not c.permissions_for(me).view_channel
-        )
+        return sum(1 for c in self.source.channels if not c.permissions_for(me).view_channel)
 
-    async def edit_guild(self):
+    async def guild_meta(self):
+        # order matters: meta first, then wipe, roles, cats, channels, emojis last
         if self.source.name != self.dest.name:
-            await self._attempt(
-                "rename guild",
-                partial(self.dest.edit, name=self.source.name),
-            )
-            print_add(f"renamed to {self.source.name}")
+            await self._poke("rename", partial(self.dest.edit, name=self.source.name))
+            say(f"renamed to {self.source.name}")
         icon = self.source.icon
         if icon is None:
             return
         try:
             image = await icon.read()
         except Exception as e:
-            print_err(f"could not fetch source icon: {e}")
+            say(f"could not fetch source icon: {e}", Fore.RED, "X")
             return
-        await self._attempt("set guild icon", partial(self.dest.edit, icon=image))
-        print_add("guild icon copied")
+        await self._poke("guild icon", partial(self.dest.edit, icon=image))
+        say("guild icon copied")
 
-    async def delete_channels(self):
-        all_channels = [c for c in self.dest.channels]
-        # categories go last - deleting one while it still has children is flaky
-        leaves = [c for c in all_channels if not isinstance(c, discord.CategoryChannel)]
-        cats = [c for c in all_channels if isinstance(c, discord.CategoryChannel)]
-        deleted = 0
+    async def wipe_channels(self):
+        # categories come last - deleting one that still holds children is flaky
+        everything = [c for c in self.dest.channels]
+        leaves = [c for c in everything if not isinstance(c, discord.CategoryChannel)]
+        cats = [c for c in everything if isinstance(c, discord.CategoryChannel)]
+        cleared = 0
         for ch in leaves + cats:
             try:
                 await ch.delete()
-                deleted += 1
+                cleared += 1
             except discord.HTTPException as e:
-                print_err("delete %s: http %s" % (ch.name, e.status))
-            await asyncio.sleep(_delay)
-        if deleted:
-            print_del(f"deleted {deleted} channels")
+                say("delete %s: http %s" % (ch.name, e.status), Fore.RED, "X")
+            await asyncio.sleep(_pace)
+        if cleared:
+            say(f"deleted {cleared} channels", Fore.MAGENTA, "-")
 
-    async def create_roles(self):
+    async def make_roles(self):
         src_roles = [
             r for r in sorted(self.source.roles, key=lambda r: r.position)
             if not r.is_default() and not r.managed
         ]
-        admin_roles = [r for r in src_roles if r.permissions.administrator]
-        if admin_roles:
-            print_warn("source has admin roles: " + ", ".join(r.name for r in admin_roles))
+        admins = [r for r in src_roles if r.permissions.administrator]
+        if admins:
+            say("source has admin roles: " + ", ".join(r.name for r in admins), Fore.YELLOW, "!")
 
         made = 0
         for r in src_roles:
-            new = await self._attempt(
-                f"create role {r.name}",
+            new = await self._poke(
+                f"role {r.name}",
                 partial(
                     self.dest.create_role,
                     name=r.name,
@@ -137,26 +113,26 @@ class Clone:
             if new:
                 made += 1
         if made:
-            print_add("created %d roles" % made)
+            say("made %d roles" % made)
 
-        # @everyone keeps its id, so set perms on it in place instead of re-creating
-        await self._attempt(
-            "set @everyone permissions",
+        # @everyone is the reserved id in every guild - it can't be deleted or
+        # recreated, so its permissions get edited in place to match the source
+        await self._poke(
+            "@everyone perms",
             partial(self.dest.default_role.edit, permissions=self.source.default_role.permissions),
         )
 
-        self.role_lookup = {r.name: r for r in self.dest.roles}
-
+        self.name2role = {r.name: r for r in self.dest.roles}
+        # newly created roles all land at the bottom of the stack, so re-poke
+        # positions afterwards to roughly mirror the source's order
         for i, src_role in enumerate(src_roles, start=1):
-            dst_role = self.role_lookup.get(src_role.name)
+            dst_role = self.name2role.get(src_role.name)
             if dst_role:
-                await self._attempt(
-                    f"position role {src_role.name}",
-                    partial(dst_role.edit, position=i),
-                )
+                await self._poke(f"position {src_role.name}", partial(dst_role.edit, position=i))
 
-    def _ov(self, overwrites):
-        # members aren't copied over, so their overrides are useless - drop them
+    def _map_ow(self, overwrites):
+        # member-level overrides die here - members aren't cloned, so a per-member
+        # lock would just silently vanish; only role overrides survive
         mapped = {}
         for target, ov in overwrites.items():
             if isinstance(target, discord.Member):
@@ -166,35 +142,35 @@ class Clone:
                 if src_role is None:
                     continue
                 target = src_role
-            dst_role = self.role_lookup.get(target.name)
+            dst_role = self.name2role.get(target.name)
             if dst_role is not None:
                 mapped[dst_role] = ov
         return mapped
 
-    async def create_categories(self):
+    async def make_cats(self):
         cats = sorted(self.source.categories, key=lambda c: c.position)
-        made = 0
+        done = 0
         for cat in cats:
-            ow = self._ov(cat.overwrites)
-            ok = await self._attempt(
-                f"create category {cat.name}",
+            ow = self._map_ow(cat.overwrites)
+            got = await self._poke(
+                f"category {cat.name}",
                 partial(self.dest.create_category, name=cat.name, overwrites=ow),
             )
-            if ok:
-                made += 1
-            await asyncio.sleep(_delay)
-        if made:
-            print_add(f"{made} categories created")
+            if got:
+                done += 1
+            await asyncio.sleep(_pace)
+        if done:
+            say(f"{done} categories created")
 
-    async def create_channels(self):
-        dest_cats = {c.name: c for c in self.dest.categories}
+    async def make_channels(self):
+        byname = {c.name: c for c in self.dest.categories}
 
-        made = 0
+        did = 0
         for text in sorted(self.source.text_channels, key=lambda c: c.position):
-            ow = self._ov(text.overwrites)
-            cat = dest_cats.get(text.category.name) if text.category else None
-            ok = await self._attempt(
-                f"create text channel #{text.name}",
+            ow = self._map_ow(text.overwrites)
+            parent = byname.get(text.category.name) if text.category else None
+            ch = await self._poke(
+                f"text #{text.name}",
                 partial(
                     self.dest.create_text_channel,
                     name=text.name,
@@ -202,21 +178,21 @@ class Clone:
                     slowmode_delay=text.slowmode_delay,
                     nsfw=text.nsfw,
                     overwrites=ow or None,
-                    category=cat,
+                    category=parent,
                 ),
             )
-            if ok:
-                made += 1
-            await asyncio.sleep(_delay)
-        if made:
-            print_add(f"{made} text channels created")
+            if ch:
+                did += 1
+            await asyncio.sleep(_pace)
+        if did:
+            say(f"{did} text channels in")
 
-        made = 0
+        got = 0
         for voice in sorted(self.source.voice_channels, key=lambda c: c.position):
-            ow = self._ov(voice.overwrites)
-            cat = dest_cats.get(voice.category.name) if voice.category else None
-            ok = await self._attempt(
-                f"create voice channel {voice.name}",
+            ow = self._map_ow(voice.overwrites)
+            parent = byname.get(voice.category.name) if voice.category else None
+            ch = await self._poke(
+                f"voice {voice.name}",
                 partial(
                     self.dest.create_voice_channel,
                     name=voice.name,
@@ -224,43 +200,45 @@ class Clone:
                     user_limit=voice.user_limit,
                     nsfw=voice.nsfw,
                     overwrites=ow or None,
-                    category=cat,
+                    category=parent,
                 ),
             )
-            if ok:
-                made += 1
-            await asyncio.sleep(_delay)
-        if made:
-            print_add(f"{made} voice channels done")
+            if ch:
+                got += 1
+            await asyncio.sleep(_pace)
+        if got:
+            say(f"{got} voice channels done")
 
-    async def copy_emojis(self):
-        n = 0
+    async def grab_emojis(self):
+        up = 0
         for emoji in self.source.emojis:
+            if emoji.managed:
+                continue  # managed/partner emojis belong to the pack owner - can't copy them
             try:
                 image = await emoji.read()
             except Exception as e:
-                print_err(f"could not fetch emoji {emoji.name}: {e}")
+                say(f"could not fetch emoji {emoji.name}: {e}", Fore.RED, "X")
                 continue
-            ok = await self._attempt(
-                f"create emoji {emoji.name}",
+            made = await self._poke(
+                f"emoji {emoji.name}",
                 partial(self.dest.create_custom_emoji, name=emoji.name, image=image),
             )
-            if ok:
-                n += 1
+            if made:
+                up += 1
             await asyncio.sleep(0.3)
-        if n:
-            print_add(f"{n} emojis created")
+        if up:
+            say(f"{up} emojis copied")
 
     def plan(self):
         roles = len([r for r in self.source.roles if not r.is_default() and not r.managed])
         lines = [
-            f"source: {self.source.name} ({self.source.id})",
-            f"dest: {self.dest.name} ({self.dest.id})",
-            f"roles: {roles}",
-            f"categories: {len(self.source.categories)}",
-            f"text: {len(self.source.text_channels)}",
-            f"voice: {len(self.source.voice_channels)}",
+            "source: %s (%s)" % (self.source.name, self.source.id),
+            "dest: %s (%s)" % (self.dest.name, self.dest.id),
+            "roles: %d" % roles,
+            "categories: %d" % len(self.source.categories),
+            "text: %d" % len(self.source.text_channels),
+            "voice: %d" % len(self.source.voice_channels),
         ]
         if self.use_emojis:
-            lines.append(f"emojis: {len(self.source.emojis)}")
+            lines.append("emojis: %d" % len(self.source.emojis))
         return lines
