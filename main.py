@@ -18,17 +18,18 @@ def ask_id(prompt):
         print_err("must be a numeric guild ID")
 
 
+def confirm(prompt):
+    return input(prompt).strip().lower() in ("y", "yes")
+
+
 def ask_token():
     while True:
-        have = input("do you already have your Discord token? [y/N]: ").strip().lower()
-        if have in ("", "n", "no"):
+        if not confirm("do you already have your Discord token? [y/N]: "):
             get_own_token()
-            if input("got your token now? you can continue (Y) or quit (N): ").strip().lower() != "y":
+            if not confirm("got your token now? continue (Y) or quit (N): "):
                 sys.exit(0)
             break
-        if have in ("y", "yes"):
-            break
-        print_err("invalid choice")
+        break
     try:
         token = getpass.getpass("paste your token: ").strip()
     except Exception:
@@ -37,15 +38,6 @@ def ask_token():
         print_err("no token provided")
         sys.exit(1)
     return token
-
-
-def resolve_token(args):
-    if args.token:
-        return args.token.strip()
-    env = os.environ.get("DISCORD_TOKEN")
-    if env:
-        return env.strip()
-    return ask_token()
 
 
 async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
@@ -71,7 +63,7 @@ async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
         print_warn("destination account is missing: " + ", ".join(missing))
         print_warn("cloning will partially fail without these; only continue on a server where you manage it")
         if not yes:
-            if input("continue anyway? [y/N]: ").strip().lower() != "y":
+            if not confirm("continue anyway? [y/N]: "):
                 return
 
     invis = clone.invis_source_channels()
@@ -88,7 +80,7 @@ async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
         print_info("merge mode: existing destination channels are kept, only missing ones are added")
 
     if not yes:
-        if input("start cloning? [y/N]: ").strip().lower() != "y":
+        if not confirm("start cloning? [y/N]: "):
             print_info("aborted by user")
             return
 
@@ -102,56 +94,53 @@ async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
         await clone.copy_emojis()
 
     elapsed = time.strftime("%M:%S", time.gmtime(time.time() - started))
-    print_add(f"done in {elapsed} — {source.name} cloned into {dest.name}")
+    print_add(f"done in {elapsed} - {source.name} cloned into {dest.name}")
 
 
 def get_own_token():
-    print_info("how to grab your own token from the Discord client (desktop or web)")
+    print_info("how to grab your own token (desktop client or web)")
     print()
 
-    print("method 1  (no code, works everywhere) - Network tab:")
-    print("  1. log into Discord (desktop app or browser)")
-    print("  2. open DevTools: desktop app or browser = F12 / Cmd+Option+I / Ctrl+Shift+I")
-    print("  3. go to the Network tab, then reload Discord (F5)")
-    print("  4. click any API request in the list (e.g. '@me' or a 'guilds' request)")
-    print("  5. in the request Headers, scroll to 'Request Headers'")
-    print("  6. copy the value of 'authorization:' -- that value IS your token")
+    print("option 1  (works everywhere) - pull it from the Network tab:")
+    print("  1. log into Discord, open DevTools (F12 / Cmd+Alt+I)")
+    print("  2. reload Discord, then click any API request in the list")
+    print("  3. find the 'authorization:' request header")
+    print("  4. copy that value - the long random string IS your token")
     print()
 
-    print("method 2  (desktop app console) - webpack snippet:")
-    print("  1. open DevTools console (F12, Console tab) in the DESKTOP app")
-    print("  2. paste this, press Enter:")
+    print("option 2  (desktop app console) - webpack snippet:")
+    print("  1. open DevTools console (F12, Console tab)")
+    print("  2. paste this and hit Enter:")
     print()
     print("    (webpackChunkdiscord_app.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c])}]),m).find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()")
     print()
-    print("  if that errors out, the module layout changed - use method 1 instead.")
+    print("  if that errors out, the module layout changed - use option 1.")
     print()
 
-    print("safety notes:")
-    print("  - this token IS your account. only run devtools code that you pasted yourself.")
-    print("  - never send the token to anybody, and never paste it into a random website/tool.")
-    print("  - when done, close all Discord windows; tokens rotate on logout.")
-    return 0
+    print("notes:")
+    print("  - the token IS your account. only run devtools code you pasted yourself, and never send the token anywhere.")
+    print("  - close all Discord windows when done; tokens rotate on logout.")
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="discord-server-cloner",
-        description="clone a Discord server's structure into another server you manage",
+        description="copy a Discord server's structure (roles, channels, categories, emojis) into another server you manage",
     )
-    parser.add_argument("--token", help="token (skips the token prompt; nothing is stored)")
+    parser.add_argument("--token", help="token to use (skips the prompt)")
     parser.add_argument("--src", help="source guild ID to copy from")
-    parser.add_argument("--dest", help="destination guild ID to paste into (needs manage perms)")
+    parser.add_argument("--dest", help="destination guild ID to paste into")
     parser.add_argument("--no-emojis", action="store_true", help="skip emoji cloning")
     parser.add_argument("--merge", action="store_true", help="keep existing destination channels instead of wiping")
     parser.add_argument("--yes", action="store_true", help="skip all confirmation prompts")
-    parser.add_argument("--get-token", action="store_true", help="show how to obtain your own token and exit")
+    parser.add_argument("--get-token", action="store_true", help="print how to grab your own token and exit")
     args = parser.parse_args()
 
     if args.get_token:
-        sys.exit(get_own_token())
+        get_own_token()
+        return
 
-    token = resolve_token(args)
+    token = (args.token or os.environ.get("DISCORD_TOKEN") or "").strip() or ask_token()
 
     source_id = args.src or ask_id("source guild ID to copy from")
     dest_id = args.dest or ask_id("destination guild ID to paste into")
@@ -173,8 +162,7 @@ def main():
     try:
         client.run(token)
     except discord.LoginFailure:
-        print_err("login failed: the token is invalid, expired, or not accepted")
-        print_warn("if the token was just generated, it may take a moment to activate")
+        print_err("login failed: bad token (new tokens may take a moment to activate)")
         sys.exit(1)
     except discord.HTTPException as e:
         print_err(f"connection error: {e}")
