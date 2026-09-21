@@ -3,10 +3,10 @@ import time
 from functools import partial
 
 import discord
-from colorama import Fore, Style
+from colorama import *
 
-RATE_DELAY = 0.2   # self-bot; faster than this and discord starts flagging
-EMOJI_DELAY = 0.3
+# slow things down a bit - self-token accounts get rate limited fast
+_delay = 0.2
 
 
 def log(message, color=Fore.CYAN, symbol="+"):
@@ -41,23 +41,23 @@ class Clone:
         self.use_emojis = use_emojis
         self.role_lookup = {}
 
-    async def _attempt(self, desc, coro_fn):
-        # requests from user-token clients get throttled hard, so loop on 429s
+    async def _attempt(self, what, fn):
+        # user-token clients get throttled hard, so loop on 429s instead of dying
         while True:
             try:
-                return await coro_fn()
+                return await fn()
             except discord.Forbidden:
-                print_err(f"forbidden: {desc}")
+                print_err(f"forbidden: {what}")
                 return None
             except discord.NotFound:
-                print_err(f"not found: {desc}")
+                print_err(f"not found: {what}")
                 return None
             except discord.HTTPException as e:
                 if e.status != 429:
-                    print_err(f"http {e.status}: {desc}")
+                    print_err(f"http {e.status}: {what}")
                     return None
                 wait = float(getattr(e, "retry_after", 5))
-                print_warn(f"rate limited on '{desc}', sleeping {wait:.1f}s")
+                print_warn(f"rate limited on '{what}' - sleeping {wait:.1f}s")
                 await asyncio.sleep(wait)
 
     async def check_dest_perms(self):
@@ -107,8 +107,8 @@ class Clone:
                 await ch.delete()
                 deleted += 1
             except discord.HTTPException as e:
-                print_err(f"delete {ch.name}: http {e.status}")
-            await asyncio.sleep(RATE_DELAY)
+                print_err("delete %s: http %s" % (ch.name, e.status))
+            await asyncio.sleep(_delay)
         if deleted:
             print_del(f"deleted {deleted} channels")
 
@@ -137,7 +137,7 @@ class Clone:
             if new:
                 made += 1
         if made:
-            print_add(f"{made} roles created")
+            print_add("created %d roles" % made)
 
         # @everyone keeps its id, so set perms on it in place instead of re-creating
         await self._attempt(
@@ -155,7 +155,7 @@ class Clone:
                     partial(dst_role.edit, position=i),
                 )
 
-    def _map_overwrites(self, overwrites):
+    def _ov(self, overwrites):
         # members aren't copied over, so their overrides are useless - drop them
         mapped = {}
         for target, ov in overwrites.items():
@@ -175,14 +175,14 @@ class Clone:
         cats = sorted(self.source.categories, key=lambda c: c.position)
         made = 0
         for cat in cats:
-            ow = self._map_overwrites(cat.overwrites)
+            ow = self._ov(cat.overwrites)
             ok = await self._attempt(
                 f"create category {cat.name}",
                 partial(self.dest.create_category, name=cat.name, overwrites=ow),
             )
             if ok:
                 made += 1
-            await asyncio.sleep(RATE_DELAY)
+            await asyncio.sleep(_delay)
         if made:
             print_add(f"{made} categories created")
 
@@ -191,7 +191,7 @@ class Clone:
 
         made = 0
         for text in sorted(self.source.text_channels, key=lambda c: c.position):
-            ow = self._map_overwrites(text.overwrites)
+            ow = self._ov(text.overwrites)
             cat = dest_cats.get(text.category.name) if text.category else None
             ok = await self._attempt(
                 f"create text channel #{text.name}",
@@ -207,13 +207,13 @@ class Clone:
             )
             if ok:
                 made += 1
-            await asyncio.sleep(RATE_DELAY)
+            await asyncio.sleep(_delay)
         if made:
             print_add(f"{made} text channels created")
 
         made = 0
         for voice in sorted(self.source.voice_channels, key=lambda c: c.position):
-            ow = self._map_overwrites(voice.overwrites)
+            ow = self._ov(voice.overwrites)
             cat = dest_cats.get(voice.category.name) if voice.category else None
             ok = await self._attempt(
                 f"create voice channel {voice.name}",
@@ -229,12 +229,12 @@ class Clone:
             )
             if ok:
                 made += 1
-            await asyncio.sleep(RATE_DELAY)
+            await asyncio.sleep(_delay)
         if made:
-            print_add(f"{made} voice channels created")
+            print_add(f"{made} voice channels done")
 
     async def copy_emojis(self):
-        made = 0
+        n = 0
         for emoji in self.source.emojis:
             try:
                 image = await emoji.read()
@@ -246,10 +246,10 @@ class Clone:
                 partial(self.dest.create_custom_emoji, name=emoji.name, image=image),
             )
             if ok:
-                made += 1
-            await asyncio.sleep(EMOJI_DELAY)
-        if made:
-            print_add(f"{made} emojis created")
+                n += 1
+            await asyncio.sleep(0.3)
+        if n:
+            print_add(f"{n} emojis created")
 
     def plan(self):
         roles = len([r for r in self.source.roles if not r.is_default() and not r.managed])

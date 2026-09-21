@@ -5,9 +5,9 @@ import sys
 import time
 
 import discord
-from colorama import Style
+from colorama import *
 
-from cloner import Clone, print_add, print_err, print_info, print_warn
+from cloner import Clone, print_err, print_info, print_warn, print_add
 
 
 def ask_id(prompt):
@@ -42,17 +42,17 @@ def ask_token():
 
 async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
     started = time.time()
-    source = client.get_guild(int(source_id))
-    dest = client.get_guild(int(dest_id))
+    src = client.get_guild(int(source_id))
+    dst = client.get_guild(int(dest_id))
 
-    if source is None:
+    if src is None:
         print_err(f"could not see source guild {source_id}. the account must be a member (view permission is enough, no admin needed).")
         return
-    if dest is None:
+    if dst is None:
         print_err(f"could not see destination guild {dest_id}. the account must be a member there.")
         return
 
-    clone = Clone(source, dest, use_emojis=clone_emojis)
+    clone = Clone(src, dst, use_emojis=clone_emojis)
 
     print_info(f"logged in as {client.user}")
     for line in clone.plan():
@@ -70,10 +70,10 @@ async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
     if invis:
         print_warn(f"{invis} source channels are not visible to this account and will be skipped")
 
-    if wipe and dest.channels:
-        print_warn(f"this will DELETE every existing channel in destination '{dest.name}' before cloning")
+    if wipe and dst.channels:
+        print_warn(f"this will DELETE every existing channel in destination '{dst.name}' before cloning")
         if not yes:
-            if input("type the destination server name to confirm, or N to abort: ").strip() != dest.name:
+            if input("type the destination server name to confirm, or N to abort: ").strip() != dst.name:
                 print_info("aborted by user")
                 return
     elif not wipe:
@@ -94,7 +94,7 @@ async def run(client, source_id, dest_id, clone_emojis, wipe, yes):
         await clone.copy_emojis()
 
     elapsed = time.strftime("%M:%S", time.gmtime(time.time() - started))
-    print_add(f"done in {elapsed} - {source.name} cloned into {dest.name}")
+    print_add("done in %s - %s cloned into %s" % (elapsed, src.name, dst.name))
 
 
 def get_own_token():
