@@ -4,6 +4,10 @@ Copies the structure of one Discord server into another server you manage - role
 
 Run it with your own account token. It works on servers you can see and manage, no bot setup needed.
 
+## License
+
+Free to use, modify, and share. Keep the credit, don't sell it. Full terms in [LICENSE](LICENSE).
+
 ## What gets copied
 
 - server name and icon
